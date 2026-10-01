@@ -302,12 +302,15 @@ class Scheduler:
 
     def _store_results(self, job: Job, task: Task, results: list) -> None:
         pname = partition_name(task.partition)
+        # Records are stored in the reducer's emitted (sorted-by-key) order so
+        # the preview, partition list and download all share one canonical
+        # ordering: partition index ascending, then key order within each.
         self.storage.write({
             "job_id": job.job_id,
             "partition": task.partition,
             "partition_name": pname,
             "task_id": task.task_id,
-            "records": list(reversed(results)),
+            "records": list(results),
             "count": len(results),
             "written_ms": now_ms(),
         }, "jobs", job.job_id, "results", C.STAGE_REDUCE, f"{pname}.json")
@@ -337,7 +340,7 @@ class Scheduler:
             j.finished_ms = now_ms()
             j.stats["map_records_processed"] = sum(t.records_processed for t in map_tasks)
             j.stats["map_records_emitted"] = sum(t.records_emitted for t in map_tasks)
-            j.stats["reduce_records_emitted"] = sum(t.records_emitted for t in reduce_tasks) + sum(t.records_emitted for t in map_tasks)
+            j.stats["reduce_records_emitted"] = sum(t.records_emitted for t in reduce_tasks)
             j.stats["total_task_attempts"] = sum(t.attempts for t in map_tasks + reduce_tasks)
 
         self.job_manager.apply_job(job.job_id, apply)

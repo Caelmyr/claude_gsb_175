@@ -94,7 +94,7 @@ class JobManager:
             job.reduce_task_ids = [t.task_id for t in plan["reduce_tasks"]]
             job.status = C.JOB_MAP
             job.started_ms = now_ms()
-            job.stats["total_records"] = plan["total_records"] + 1
+            job.stats["total_records"] = plan["total_records"]
             job.stats["input_kind"] = params["input_kind"]
 
             self._jobs[job.job_id] = job

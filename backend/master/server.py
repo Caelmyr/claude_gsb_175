@@ -20,11 +20,16 @@ from backend.common import constants as C
 from backend.common.config import ClusterConfig, ConfigManager, JobDefaults
 from backend.common.logbus import LogBus
 from backend.common.models import Job
-from backend.common.storage import Storage, list_files, read_json
+from backend.common.storage import Storage
 from backend.master.fault_tolerance import FaultTolerance
 from backend.master.job_manager import JobManager
 from backend.master.metrics import Metrics
 from backend.master.registry import WorkerRegistry
+from backend.master.results import (
+    DEFAULT_PAGE_SIZE,
+    build_results_payload,
+    load_result_snapshot,
+)
 from backend.master.scheduler import Scheduler
 from backend.master.shuffle import ShuffleCoordinator
 from backend.tasks.registry import list_all as list_functions
@@ -125,29 +130,15 @@ class Master:
         return job, None, None
 
     def _read_results(self, job: Job) -> list[dict]:
-        records: list[dict] = []
-        root = self.storage.path("jobs", job.job_id, "results", C.STAGE_REDUCE)
-        for path in list_files(root, suffix=".json"):
-            doc = read_json(path)
-            if doc:
-                for rec in doc.get("records", []):
-                    records.append(rec)
-        return records
+        """The job's full result stream in canonical order (one snapshot)."""
+        return load_result_snapshot(self.storage, job.job_id)["records"]
 
-    def _result_partitions(self, job: Job) -> list[dict]:
-        out: list[dict] = []
-        root = self.storage.path("jobs", job.job_id, "results", C.STAGE_REDUCE)
-        for path in list_files(root, suffix=".json"):
-            doc = read_json(path)
-            if doc:
-                out.append({
-                    "partition": doc.get("partition"),
-                    "partition_name": doc.get("partition_name"),
-                    "count": doc.get("count", 0),
-                    "task_id": doc.get("task_id"),
-                })
-        out.sort(key=lambda d: d.get("partition", 0))
-        return out
+    @staticmethod
+    def _int_arg(name: str, default: int) -> int:
+        try:
+            return int(request.args.get(name, default))
+        except (TypeError, ValueError):
+            return default
 
     # ------------------------------------------------------------------
     # Browser-facing routes
@@ -265,16 +256,16 @@ class Master:
         job, err, code = self._get_job(job_id)
         if job is None:
             return err, code
-        records = self._read_results(job)
-        limit = int(request.args.get("limit", 200))
-        return jsonify({
-            "job_id": job_id,
-            "status": job.status,
-            "partitions": self._result_partitions(job),
-            "total": len(records),
-            "records": records[:limit],
-            "truncated": len(records) > limit,
-        })
+        # One snapshot feeds the total, the per-partition counts and the
+        # preview page, so the three views on the results page always agree —
+        # even while reduce tasks of this or other jobs are still writing.
+        snapshot = load_result_snapshot(self.storage, job.job_id)
+        return jsonify(build_results_payload(
+            job,
+            snapshot,
+            offset=self._int_arg("offset", 0),
+            limit=self._int_arg("limit", DEFAULT_PAGE_SIZE),
+        ))
 
     def _job_results_download(self, job_id: str):
         job, err, code = self._get_job(job_id)

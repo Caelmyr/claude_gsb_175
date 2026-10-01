@@ -128,7 +128,8 @@ def _run_reduce(spec: dict, progress_cb: ProgressCallback) -> dict:
             values = [value]
         else:
             values.append(value)
-    if prev_key is not None and len(results) < 0:
+    # Flush the final group — without this the partition's last key is lost.
+    if prev_key is not None:
         results.append(reducer(prev_key, values, params))
 
     return {
