@@ -12,7 +12,8 @@ from backend.master.fault_tolerance import FaultTolerance
 from backend.master.job_manager import JobManager
 from backend.tasks.registry import get_reducer
 from backend.tasks.samples import generate_input_records
-from backend.worker.executor import _run_map
+from backend.worker import executor
+from backend.worker.executor import _run_map, _run_reduce
 from backend.worker.shuffle_store import ShuffleStore
 
 
@@ -81,6 +82,63 @@ class TestMapReduceCorrectness(unittest.TestCase):
         result = {k: reducer(k, vs, {})["count"] for k, vs in grouped.items()}
         self.assertEqual(dict(result), dict(reference))
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestReduceCorrectness(unittest.TestCase):
+    def test_final_group_is_reduced_in_sorted_order(self):
+        class FakeHttpClient:
+            def __init__(self, pairs):
+                self.pairs = pairs
+
+            def get_json(self, url, default=None):
+                return self.pairs
+
+        tmp = tempfile.mkdtemp()
+        original_client = executor.HttpClient
+        executor.HttpClient = lambda *args, **kwargs: FakeHttpClient([
+            ["banana", 1], ["apple", 1], ["apple", 2], ["cherry", 1],
+        ])
+        try:
+            result = _run_reduce({
+                "task_id": "r-0000",
+                "job_id": "job",
+                "partition": 0,
+                "reducer": "count_reducer",
+                "params": {},
+                "fetch_plan": [{"worker_url": "http://worker", "map_task_id": "m-0000"}],
+                "tmp_dir": tmp,
+            }, lambda *args: None)
+        finally:
+            executor.HttpClient = original_client
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        self.assertEqual(result["records_processed"], 4)
+        self.assertEqual([r["key"] for r in result["results"]], ["apple", "banana", "cherry"])
+        self.assertEqual(result["results"][0]["count"], 3)
+        self.assertEqual(result["records_emitted"], 3)
+
+
+class TestMapRetryOutput(unittest.TestCase):
+    def test_map_retry_replaces_append_only_shuffle_partitions(self):
+        tmp = tempfile.mkdtemp()
+        spec = {
+            "task_id": "m-0000",
+            "job_id": "job-retry",
+            "kind": "map",
+            "mapper": "wordcount_mapper",
+            "reducer": "count_reducer",
+            "params": {},
+            "partition_count": 1,
+            "records": ["map map reduce", "map reduce"],
+            "tmp_dir": tmp,
+        }
+        try:
+            _run_map(spec, tmp, lambda *args: None)
+            _run_map(spec, tmp, lambda *args: None)  # retry the deterministic task
+            pairs = ShuffleStore(tmp).read_partition("job-retry", "m-0000", 0)
+            self.assertEqual(sorted(k for k, _ in pairs), sorted(["map"] * 3 + ["reduce"] * 2))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

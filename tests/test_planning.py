@@ -12,6 +12,7 @@ from backend.common.logbus import LogBus
 from backend.common.storage import Storage
 from backend.master.job_manager import JobManager
 from backend.master.shard_planner import split_evenly
+from backend.tasks.samples import generate_input_records
 
 
 class TestHashing(unittest.TestCase):
@@ -44,6 +45,13 @@ class TestSplitEvenly(unittest.TestCase):
         self.assertEqual(sum(len(c) for c in chunks), 2)
 
 
+class TestInputGeneration(unittest.TestCase):
+    def test_generated_record_count_is_exact_for_every_scale(self):
+        for rows in (1, 2, 10, 137, 1000):
+            with self.subTest(rows=rows):
+                self.assertEqual(len(generate_input_records("wordcount", rows, seed=rows)), rows)
+
+
 class TestSubmit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -61,7 +69,13 @@ class TestSubmit(unittest.TestCase):
         self.assertEqual(job.status, "MAP")
         self.assertEqual(len(job.map_task_ids), 4)
         self.assertEqual(len(job.reduce_task_ids), 2)
-        self.assertEqual(len(self.jm.tasks_for(job.job_id)), 6)
+        # every planned input record is dispatched exactly once
+        self.assertEqual(job.stats["total_records"], 800)
+        self.assertEqual(
+            sum(len(self.jm.planner.load_input_shard(job.job_id, t.input_shard))
+                for t in self.jm.tasks_for(job.job_id, "map")),
+            800,
+        )
         # persisted round-trip
         self.assertEqual(self.jm.get_job(job.job_id).name, "t")
 

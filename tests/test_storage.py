@@ -10,6 +10,7 @@ from backend.common.storage import (
     AtomicJsonStore, Storage, VersionConflict, append_jsonl, atomic_write_json,
     merge_jsonl_files, read_json, read_jsonl,
 )
+from backend.worker.shuffle_store import SpillSorter
 
 
 class TestAtomicJson(unittest.TestCase):
@@ -82,6 +83,23 @@ class TestAtomicJson(unittest.TestCase):
         self.assertEqual(storage.read("cfg", "c.json")["a"], 1)
         storage.append({"line": 1}, "l.jsonl")
         self.assertEqual(len(storage.read_lines("l.jsonl")), 1)
+
+    def test_multiple_spill_runs_are_not_overwritten(self):
+        sorter = SpillSorter(spill=2, work_dir=self.tmp)
+        sorter.add_many([("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5)])
+        self.assertEqual(
+            list(sorter.iter_sorted()),
+            [["a", 1], ["b", 2], ["c", 3], ["d", 4], ["e", 5]],
+        )
+
+    def test_concurrent_spill_sorters_have_independent_run_files(self):
+        first = SpillSorter(spill=2, work_dir=self.tmp)
+        second = SpillSorter(spill=2, work_dir=self.tmp)
+        first.add_many([("a", 1), ("b", 2), ("c", 3)])
+        second.add_many([("x", 1), ("y", 2)])
+        # Consuming the first iterator must not delete the second sorter's runs.
+        self.assertEqual(list(first.iter_sorted()), [["a", 1], ["b", 2], ["c", 3]])
+        self.assertEqual(list(second.iter_sorted()), [["x", 1], ["y", 2]])
 
 
 if __name__ == "__main__":

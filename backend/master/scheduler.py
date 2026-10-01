@@ -268,7 +268,12 @@ class Scheduler:
             self.fault_tolerance.handle_task_failure(job, task, payload.get("error", ""), worker_id)
             return
 
-        # Success path.
+        # Success path.  Persist reduce output before publishing SUCCEEDED: the
+        # scheduler may finish the job as soon as that status is visible, and a
+        # successful job must never advertise a partition whose result is missing.
+        if task.kind == C.TASK_REDUCE:
+            self._store_results(job, task, payload.get("results", []))
+
         def apply(t: Task) -> None:
             t.status = C.TASK_SUCCEEDED
             t.progress = 1.0
@@ -288,7 +293,6 @@ class Scheduler:
         self.metrics.record_task(job, task, int(payload.get("duration_ms", 0)))
 
         if task.kind == C.TASK_REDUCE:
-            self._store_results(job, task, payload.get("results", []))
             self.shuffle.mark_partition_done(job, task.partition,
                                              task.stats.get("shuffle_bytes", 0))
 
@@ -307,7 +311,7 @@ class Scheduler:
             "partition": task.partition,
             "partition_name": pname,
             "task_id": task.task_id,
-            "records": list(reversed(results)),
+            "records": list(results),
             "count": len(results),
             "written_ms": now_ms(),
         }, "jobs", job.job_id, "results", C.STAGE_REDUCE, f"{pname}.json")
@@ -337,7 +341,7 @@ class Scheduler:
             j.finished_ms = now_ms()
             j.stats["map_records_processed"] = sum(t.records_processed for t in map_tasks)
             j.stats["map_records_emitted"] = sum(t.records_emitted for t in map_tasks)
-            j.stats["reduce_records_emitted"] = sum(t.records_emitted for t in reduce_tasks) + sum(t.records_emitted for t in map_tasks)
+            j.stats["reduce_records_emitted"] = sum(t.records_emitted for t in reduce_tasks)
             j.stats["total_task_attempts"] = sum(t.attempts for t in map_tasks + reduce_tasks)
 
         self.job_manager.apply_job(job.job_id, apply)

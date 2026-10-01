@@ -308,6 +308,7 @@ fieldset legend { font-size: 13px; font-weight: 600; color: var(--ink-2); paddin
 .btn.danger { background: var(--critical); color: #fff; border-color: var(--critical); }
 .btn.small { padding: 4px 10px; font-size: 13px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pager-label { min-width: 64px; text-align: center; align-self: center; font-variant-numeric: tabular-nums; }
 
 .pill-group { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill {

@@ -50,6 +50,11 @@ def _run_map(spec: dict, data_root: str, progress_cb: ProgressCallback) -> dict:
     task_id = spec["task_id"]
     spill = int(spec.get("spill_records", 20000))
 
+    # A retry runs the deterministic map from the same input shard.  Shuffle
+    # output is append-only, so remove any attempt's stale partitions first;
+    # otherwise retry data is fetched twice by the reducer.
+    store.cleanup(job_id, task_id)
+
     total = max(1, len(records))
     buffers: dict[int, list[tuple[Any, Any]]] = {}
     processed = 0
@@ -128,7 +133,7 @@ def _run_reduce(spec: dict, progress_cb: ProgressCallback) -> dict:
             values = [value]
         else:
             values.append(value)
-    if prev_key is not None and len(results) < 0:
+    if prev_key is not None:
         results.append(reducer(prev_key, values, params))
 
     return {
@@ -215,7 +220,9 @@ class Executor:
         # to know worker-local tuning (spill threshold, temp directory).
         spec = dict(spec)
         spec.setdefault("spill_records", int(getattr(self.config, "shuffle_spill_records", 20000)))
-        spec.setdefault("tmp_dir", self._tmp_dir)
+        task_tmp_dir = os.path.join(self._tmp_dir, f"{task_id}-{now_ms()}")
+        os.makedirs(task_tmp_dir, exist_ok=True)
+        spec.setdefault("tmp_dir", task_tmp_dir)
         with self._lock:
             if task_id in self._handles:
                 return False

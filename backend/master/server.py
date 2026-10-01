@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 from typing import Optional
 
@@ -20,11 +21,12 @@ from backend.common import constants as C
 from backend.common.config import ClusterConfig, ConfigManager, JobDefaults
 from backend.common.logbus import LogBus
 from backend.common.models import Job
-from backend.common.storage import Storage, list_files, read_json
+from backend.common.storage import Storage
 from backend.master.fault_tolerance import FaultTolerance
 from backend.master.job_manager import JobManager
 from backend.master.metrics import Metrics
 from backend.master.registry import WorkerRegistry
+from backend.master.results import build_result_snapshot, paginate_snapshot
 from backend.master.scheduler import Scheduler
 from backend.master.shuffle import ShuffleCoordinator
 from backend.tasks.registry import list_all as list_functions
@@ -123,31 +125,6 @@ class Master:
         if job is None:
             return None, jsonify({"error": f"unknown job {job_id}"}), 404
         return job, None, None
-
-    def _read_results(self, job: Job) -> list[dict]:
-        records: list[dict] = []
-        root = self.storage.path("jobs", job.job_id, "results", C.STAGE_REDUCE)
-        for path in list_files(root, suffix=".json"):
-            doc = read_json(path)
-            if doc:
-                for rec in doc.get("records", []):
-                    records.append(rec)
-        return records
-
-    def _result_partitions(self, job: Job) -> list[dict]:
-        out: list[dict] = []
-        root = self.storage.path("jobs", job.job_id, "results", C.STAGE_REDUCE)
-        for path in list_files(root, suffix=".json"):
-            doc = read_json(path)
-            if doc:
-                out.append({
-                    "partition": doc.get("partition"),
-                    "partition_name": doc.get("partition_name"),
-                    "count": doc.get("count", 0),
-                    "task_id": doc.get("task_id"),
-                })
-        out.sort(key=lambda d: d.get("partition", 0))
-        return out
 
     # ------------------------------------------------------------------
     # Browser-facing routes
@@ -265,34 +242,42 @@ class Master:
         job, err, code = self._get_job(job_id)
         if job is None:
             return err, code
-        records = self._read_results(job)
-        limit = int(request.args.get("limit", 200))
-        return jsonify({
-            "job_id": job_id,
-            "status": job.status,
-            "partitions": self._result_partitions(job),
-            "total": len(records),
-            "records": records[:limit],
-            "truncated": len(records) > limit,
-        })
+        snapshot = build_result_snapshot(self.job_manager, self.storage, job)
+        page = paginate_snapshot(
+            snapshot,
+            request.args.get("page", 1),
+            request.args.get("limit", 100),
+        )
+        return jsonify(page)
 
     def _job_results_download(self, job_id: str):
         job, err, code = self._get_job(job_id)
         if job is None:
             return err, code
-        records = self._read_results(job)
+        snapshot = build_result_snapshot(self.job_manager, self.storage, job)
+        records = snapshot["records"]
         fmt = request.args.get("format", "json").lower()
         if fmt == "csv":
             return self._as_csv(job, records)
-        body = {"job_id": job_id, "job_name": job.name, "records": records, "count": len(records)}
+        body = {
+            "job_id": job_id,
+            "job_name": job.name,
+            "status": job.status,
+            "complete": snapshot["complete"],
+            "partitions": snapshot["partitions"],
+            "records": records,
+            "count": len(records),
+        }
         return Response(
-            io.StringIO(__import__("json").dumps(body, ensure_ascii=False, indent=2)).getvalue(),
+            json.dumps(body, ensure_ascii=False, indent=2),
             mimetype="application/json",
             headers={"Content-Disposition": f"attachment; filename={job_id}.json"},
         )
 
     def _as_csv(self, job: Job, records: list[dict]) -> Response:
         fieldnames: list[str] = []
+        if records:
+            fieldnames.append("key")
         for rec in records[:50]:
             for key in rec.keys():
                 if key != "key" and key not in fieldnames:

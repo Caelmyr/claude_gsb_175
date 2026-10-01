@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import heapq
 import os
+import uuid
 from typing import Any, Iterable, Iterator, Optional
 
 from backend.common import jsonutil
@@ -111,6 +112,7 @@ class SpillSorter:
     def __init__(self, spill: int = 20000, work_dir: str = "/tmp") -> None:
         self.spill = max(1, spill)
         self.work_dir = work_dir
+        self._run_token = uuid.uuid4().hex
         os.makedirs(self.work_dir, exist_ok=True)
         self._mem: list[tuple[Any, Any]] = []
         self._runs: list[str] = []
@@ -133,8 +135,11 @@ class SpillSorter:
         # Sort by key.  Map/reduce keys for the built-in mappers are homogeneous
         # strings, so native ordering matches the grouping comparison.
         self._mem.sort(key=lambda kv: kv[0])
-        path = os.path.join(self.work_dir, f"gsb-sort-{os.getpid()}-{self._run_seq}.jsonl")
         self._run_seq += 1
+        path = os.path.join(
+            self.work_dir,
+            f"gsb-sort-{os.getpid()}-{self._run_token}-{self._run_seq}.jsonl",
+        )
         atomic_write_text(
             path,
             "".join(jsonutil.dumps_line([k, v]) + "\n" for k, v in self._mem),
@@ -152,8 +157,12 @@ class SpillSorter:
             self._flush_run()
         streams = [iter(read_jsonl_stream(p)) for p in self._runs]
         # read_jsonl_stream yields [key, value]; heapq.merge needs the key.
-        yield from heapq.merge(*streams, key=lambda pair: pair[0])
-        self._cleanup()
+        # Keep the run files alive until this iterator is fully consumed; another
+        # reduce task may reuse the same worker directory concurrently.
+        try:
+            yield from heapq.merge(*streams, key=lambda pair: pair[0])
+        finally:
+            self._cleanup()
 
     def _cleanup(self) -> None:
         for p in self._runs:
